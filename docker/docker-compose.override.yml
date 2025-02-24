@@ -1,0 +1,9 @@
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/development.Dockerfile  # Ajustar ruta
+    volumes:
+      - ../:/usr/src/app  # Sube un nivel para montar todo el código
+      - /usr/src/app/node_modules
+    command: npm run dev

@@ -1,0 +1,22 @@
+# Dependencias
+node_modules/
+
+# Archivos de entorno
+.env
+
+# Logs
+*.log
+logs/
+
+# Build/coverage
+build/
+dist/
+coverage/
+
+# Configs locales de IDE
+.vscode/
+.idea/
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db
