@@ -1,21 +1,53 @@
-// src/services/terraformService.js
+const express = require('express');
+const router = express.Router();
 const { exec } = require('child_process');
+const path = require('path');
 
-const runTerraform = (configDir) => {
-  return new Promise((resolve, reject) => {
-    // Ejemplo de comando para ejecutar Terraform en un contenedor Docker
-    const command = `
-      docker run --rm -v ${configDir}:/workspace -w /workspace hashicorp/terraform:light init &&
-      docker run --rm -v ${configDir}:/workspace -w /workspace hashicorp/terraform:light apply -auto-approve
-    `;
+router.post('/execute', (req, res) => {
+  // Ruta del directorio de Terraform
+  let terraformPath = path.join(process.cwd(), 'terraform', 'test');
+  terraformPath = terraformPath.replace(/\\/g, '/'); // Normalizar para Docker
 
-    exec(command, (error, stdout, stderr) => {
+  // Ejecutar Terraform init, apply y destroy en tres comandos separados
+  const dockerInitCommand = `docker run --rm -v "${terraformPath}":/workspace -w /workspace hashicorp/terraform:light init`;
+  const dockerApplyCommand = `docker run --rm -v "${terraformPath}":/workspace -w /workspace hashicorp/terraform:light apply -auto-approve`;
+  const dockerDestroyCommand = `docker run --rm -v "${terraformPath}":/workspace -w /workspace hashicorp/terraform:light destroy -auto-approve`;
+
+  exec(dockerInitCommand, (error, stdout, stderr) => {
+    if (error) {
+      console.error(`Error ejecutando terraform init: ${error.message}`);
+      return res.status(500).json({ error: error.message });
+    }
+    if (stderr) {
+      console.error(`stderr: ${stderr}`);
+    }
+    console.log(`stdout: ${stdout}`);
+    
+    // Ejecutar terraform apply solo si init fue exitoso
+    exec(dockerApplyCommand, (error, stdout, stderr) => {
       if (error) {
-        return reject(stderr || error.message);
+        console.error(`Error ejecutando terraform apply: ${error.message}`);
+        return res.status(500).json({ error: error.message });
       }
-      resolve(stdout);
+      if (stderr) {
+        console.error(`stderr: ${stderr}`);
+      }
+      console.log(`stdout: ${stdout}`);
+      
+      // Ejecutar terraform destroy después de apply
+      exec(dockerDestroyCommand, (error, stdout, stderr) => {
+        if (error) {
+          console.error(`Error ejecutando terraform destroy: ${error.message}`);
+          return res.status(500).json({ error: error.message });
+        }
+        if (stderr) {
+          console.error(`stderr: ${stderr}`);
+        }
+        console.log(`stdout: ${stdout}`);
+        return res.status(200).json({ stdout });
+      });
     });
   });
-};
+});
 
-module.exports = { runTerraform };
+module.exports = router;

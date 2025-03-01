@@ -10,6 +10,11 @@ services:
       - MONGO_URI=mongodb://mongo:27017/lanzo
     depends_on:
       - mongo
+    volumes:
+      - ../:/usr/src/app
+      - /usr/src/app/node_modules
+      # Montar socket del host
+      - /var/run/docker.sock:/var/run/docker.sock
 
   mongo:
     image: mongo:5
