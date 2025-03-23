@@ -1,100 +1,123 @@
+// services/terraformService.js
 const express = require('express');
 const router = express.Router();
-const { exec } = require('child_process');
+const Docker = require('dockerode');
+const docker = new Docker();
 const path = require('path');
 
 /**
- * Ejecuta un comando de Terraform en Docker sin exponer detalles.
- * @param {string} servicePath - Ruta donde se encuentran los archivos de Terraform para el servicio.
- * @param {string} commandType - Tipo de comando: 'init', 'apply' o 'destroy'.
- * @param {function} callback - Función callback que se llama con (error) en caso de fallo o sin argumentos si es exitoso.
+ * Ejecuta un comando de Terraform en un contenedor usando dockerode.
+ *
+ * Se utiliza la imagen 'hashicorp/terraform:light' para ejecutar el comando en el directorio
+ * donde se encuentran los archivos de Terraform, que se monta en /workspace.
+ *
+ * @param {string} servicePath - Ruta local con los archivos de Terraform.
+ * @param {string} commandType - 'init', 'apply' o 'destroy'.
+ * @returns {Promise<string>} - Logs resultantes de la ejecución del comando.
+ * @throws {Error} - Si el comando falla.
  */
-function runCommand(servicePath, commandType, callback) {
+async function runTerraformCommand(servicePath, commandType) {
   const normalizedPath = servicePath.replace(/\\/g, '/');
-  let dockerCommand = '';
-
+  let command = [];
   switch (commandType) {
     case 'init':
-      dockerCommand = `docker run --rm -v "${normalizedPath}":/workspace -w /workspace hashicorp/terraform:light init`;
+      command = ['init'];
       break;
     case 'apply':
-      dockerCommand = `docker run --rm -v "${normalizedPath}":/workspace -w /workspace hashicorp/terraform:light apply -auto-approve`;
+      command = ['apply', '-auto-approve'];
       break;
     case 'destroy':
-      dockerCommand = `docker run --rm -v "${normalizedPath}":/workspace -w /workspace hashicorp/terraform:light destroy -auto-approve`;
+      command = ['destroy', '-auto-approve'];
       break;
     default:
-      return callback(new Error('Tipo de comando no válido'));
+      throw new Error('Tipo de comando no válido');
   }
 
-  exec(dockerCommand, (error) => {
-    if (error) {
-      return callback(new Error(`Error al ejecutar ${commandType}`));
-    }
-    callback();
+  // Variables de entorno para conectarse a Localstack o AWS (de prueba)
+  const envVars = [
+    'AWS_ACCESS_KEY_ID=test',
+    'AWS_SECRET_ACCESS_KEY=test',
+    'AWS_DEFAULT_REGION=us-east-1'
+  ];
+
+  // Opciones para crear el contenedor
+  const containerOptions = {
+    Image: 'hashicorp/terraform:light',
+    Cmd: command,
+    Env: envVars,
+    HostConfig: {
+      // Se monta el directorio de Terraform en /workspace dentro del contenedor
+      Binds: [`${normalizedPath}:/workspace`]
+    },
+    WorkingDir: '/workspace'
+  };
+
+  // Crear y arrancar el contenedor
+  const container = await docker.createContainer(containerOptions);
+  await container.start();
+
+  // Esperamos a que el contenedor finalice
+  const result = await container.wait();
+
+  // Obtenemos los logs (stdout y stderr) del contenedor
+  const logStream = await container.logs({
+    stdout: true,
+    stderr: true,
+    follow: false
   });
+
+  // Convertir los logs a cadena
+  const logs = logStream.toString('utf8');
+
+  // Eliminamos el contenedor (para limpiar recursos)
+  await container.remove();
+
+  if (result.StatusCode !== 0) {
+    throw new Error(`Error ejecutando ${commandType}: ${logs}`);
+  }
+  return logs;
 }
 
 /**
- * Ejecuta en secuencia los comandos init, apply y destroy para un servicio.
- * @param {string} servicePath - Ruta del servicio.
- * @param {function} callback - Callback con (error) en caso de fallo o sin argumentos si es exitoso.
+ * Ejecuta secuencialmente los comandos 'init' y 'apply' para desplegar la infraestructura.
+ *
+ * @param {string} servicePath - Ruta donde se encuentran los archivos de Terraform.
+ * @returns {Promise<object>} - Logs de las ejecuciones 'init' y 'apply'.
  */
-function executeServiceCommands(servicePath, callback) {
-  runCommand(servicePath, 'init', (error) => {
-    if (error) return callback(error);
-    runCommand(servicePath, 'apply', (error) => {
-      if (error) return callback(error);
-      runCommand(servicePath, 'destroy', (error) => {
-        if (error) return callback(error);
-        callback();
-      });
-    });
-  });
+async function deployTerraform(servicePath) {
+  const initOutput = await runTerraformCommand(servicePath, 'init');
+  const applyOutput = await runTerraformCommand(servicePath, 'apply');
+  return { init: initOutput, apply: applyOutput };
 }
 
-// Ruta por defecto para pruebas generales
-router.post('/execute', (req, res) => {
-  const terraformPath = path.join(process.cwd(), 'terraform', 'test');
-  executeServiceCommands(terraformPath, (error) => {
-    if (error) {
-      return res.status(500).json({ error: error.message });
-    }
-    res.status(200).json({ message: 'Operación completada con éxito' });
-  });
+/**
+ * Endpoint para desplegar la infraestructura.
+ * Se espera que los archivos de Terraform estén en la carpeta 'terraform/<service>'.
+ */
+router.post('/deploy/:service', async (req, res) => {
+  const service = req.params.service;
+  const terraformPath = path.join(process.cwd(), 'terraform', service);
+  try {
+    const outputs = await deployTerraform(terraformPath);
+    res.status(200).json({ message: 'Despliegue completado con éxito', outputs });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-// Ruta para el servicio "ollama"
-router.post('/ollama', (req, res) => {
-  const servicePath = path.join(process.cwd(), 'terraform', 'ollama');
-  executeServiceCommands(servicePath, (error) => {
-    if (error) {
-      return res.status(500).json({ error: error.message });
-    }
-    res.status(200).json({ message: 'Operación completada con éxito' });
-  });
-});
-
-// Ruta para el servicio "wordpress"
-router.post('/wordpress', (req, res) => {
-  const servicePath = path.join(process.cwd(), 'terraform', 'wordpress');
-  executeServiceCommands(servicePath, (error) => {
-    if (error) {
-      return res.status(500).json({ error: error.message });
-    }
-    res.status(200).json({ message: 'Operación completada con éxito' });
-  });
-});
-
-// Ruta para el servicio "odoo"
-router.post('/odoo', (req, res) => {
-  const servicePath = path.join(process.cwd(), 'services', 'odoo');
-  executeServiceCommands(servicePath, (error) => {
-    if (error) {
-      return res.status(500).json({ error: error.message });
-    }
-    res.status(200).json({ message: 'Operación completada con éxito' });
-  });
+/**
+ * Endpoint para destruir la infraestructura.
+ * Se utiliza el comando 'destroy' en la misma carpeta 'terraform/<service>'.
+ */
+router.post('/destroy/:service', async (req, res) => {
+  const service = req.params.service;
+  const terraformPath = path.join(process.cwd(), 'terraform', service);
+  try {
+    const destroyOutput = await runTerraformCommand(terraformPath, 'destroy');
+    res.status(200).json({ message: 'Recursos destruidos con éxito', output: destroyOutput });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 module.exports = router;

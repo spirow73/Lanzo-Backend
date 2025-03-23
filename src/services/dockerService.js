@@ -1,111 +1,177 @@
 // services/dockerService.js
 const express = require('express');
 const router = express.Router();
-const { exec } = require('child_process');
+const Docker = require('dockerode');
+const docker = new Docker();
 
-/**
- * Configuración de los comandos Docker para cada servicio.
- * Cada servicio define:
- * - run: comando para iniciar el contenedor.
- * - stop: comando para detener y eliminar el contenedor.
- * - port: comando para obtener el puerto mapeado.
- */
+// Configuración de cada servicio usando dockerode.
 const servicesConfig = {
-    wordpress: {
-        run: 'docker run -d --name wordpress -p 8080:80 wordpress:latest',
-        stop: 'docker stop wordpress & docker rm wordpress',
-        port: 'docker port wordpress 80'
+  wordpress: {
+    image: 'wordpress:latest',
+    containerName: 'wordpress',
+    portBindings: {
+      "80/tcp": [{ HostPort: "8080" }]
+    }
+  },
+  canvas: {
+    image: 'canvas:latest',
+    containerName: 'canvas',
+    portBindings: {
+      "3000/tcp": [{ HostPort: "3000" }]
+    }
+  },
+  ollama: {
+    image: 'ollama/ollama',
+    containerName: 'ollama',
+    portBindings: {
+      "11434/tcp": [{ HostPort: "11434" }]
     },
-    canvas: {
-        run: 'docker run -d --name canvas -p 3000:3000 canvas:latest',
-        stop: 'docker stop canvas & docker rm canvas',
-        port: 'docker port canvas 3000'
+    // Mapeo de volúmenes para persistencia
+    binds: ['ollama:/root/.ollama'],
+    // Uso del runtime de NVIDIA si es necesario
+    runtime: 'nvidia'
+  },
+  openwebui: {
+    image: 'ghcr.io/open-webui/open-webui:main',
+    containerName: 'openwebui',
+    portBindings: {
+      "8080/tcp": [{ HostPort: "3000" }]
     },
-    ollama: {
-        run: 'docker run -d --gpus=all -v ollama:/root/.ollama -p 11434:11434 --name ollama ollama/ollama && docker exec ollama ollama pull gemma3:1b',
-        stop: 'docker stop ollama & docker rm ollama',
-        port: 'docker port ollama 11434'
-    },    
-    openwebui: {
-        run: `docker run -d --name openwebui --gpus=all -p 3000:8080 \
-          -e ENABLE_OLLAMA_API=True \
-          -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \
-          -v ollama:/root/.ollama \
-          ghcr.io/open-webui/open-webui:main`,
-        stop: 'docker stop openwebui & docker rm openwebui',
-        port: 'docker port openwebui 8080'
+    env: [
+      "ENABLE_OLLAMA_API=True",
+      "OLLAMA_BASE_URL=http://host.docker.internal:11434"
+    ],
+    binds: ['ollama:/root/.ollama'],
+    runtime: 'nvidia'
+  },
+  // Servicio Localstack para levantar S3, EC2 y otros servicios comunes.
+  localstack: {
+    image: 'localstack/localstack',
+    containerName: 'localstack',
+    portBindings: {
+      "4566/tcp": [{ HostPort: "4566" }],
+      "4571/tcp": [{ HostPort: "4571" }],
     },
-    ollamaweb: {
-        run: `docker network create ollamaweb 2>nul & \
-              docker run -d --gpus=all -v ollama:/root/.ollama --network ollamaweb -p 11434:11434 --name ollama ollama/ollama & \
-              timeout /t 5 /nobreak >nul & \
-              docker exec ollama ollama pull gemma3:1b & \
-              docker run -d --name openwebui --gpus=all -p 3000:8080 \
-              -e ENABLE_OLLAMA_API=True \
-              -e OLLAMA_BASE_URL=http://ollama:11434 \
-              -v ollama:/root/.ollama \
-              --network ollamaweb \
-              ghcr.io/open-webui/open-webui:main`,
-        stop: `docker stop openwebui & docker rm openwebui & \
-               docker stop ollama & docker rm ollama & \
-               docker network rm ollamaweb`,
-        port: `echo "Ollama: $(docker port ollama 11434) | OpenWebUI: $(docker port openwebui 8080)"`
-    },    
+    env: [
+      "SERVICES=s3,ec2",         // Puedes agregar otros servicios separados por comas (e.g., dynamodb,sqs)
+      "GATEWAY_LISTEN=4566",
+    ],
+    volumes: [
+      {
+        host_path: "/var/run/docker.sock",
+        container_path: "/var/run/docker.sock"
+      }
+    ]
+  }  
+  // Se puede extender la configuración para otros servicios según se requiera.
 };
 
+/**
+ * Crea y levanta un contenedor basado en la configuración del servicio.
+ * @param {string} service - Nombre del servicio.
+ * @returns {Promise<object>} - Instancia del contenedor creado.
+ */
+async function runContainer(service) {
+  const config = servicesConfig[service];
+  if (!config) {
+    throw new Error('Servicio no soportado');
+  }
+
+  // Configurar opciones base para la creación del contenedor
+  const containerOptions = {
+    Image: config.image,
+    name: config.containerName,
+    ExposedPorts: {},
+    HostConfig: {
+      PortBindings: {},
+      Binds: config.binds || []
+    },
+    Env: config.env || []
+  };
+
+  // Configurar el mapeo de puertos
+  for (const containerPort in config.portBindings) {
+    containerOptions.ExposedPorts[containerPort] = {};
+    containerOptions.HostConfig.PortBindings[containerPort] = config.portBindings[containerPort];
+  }
+
+  // Si el servicio requiere GPU, se añade el runtime correspondiente
+  if (config.runtime) {
+    containerOptions.HostConfig.Runtime = config.runtime;
+  }
+
+  // Crear y arrancar el contenedor
+  const container = await docker.createContainer(containerOptions);
+  await container.start();
+  return container;
+}
 
 /**
- * Ejecuta un comando Docker basado en la configuración del servicio.
- * 
+ * Detiene y elimina el contenedor del servicio.
  * @param {string} service - Nombre del servicio.
- * @param {string} type - Tipo de comando: "run", "stop" o "port".
- * @param {function} callback - Función callback que se llama con (error, output).
+ * @returns {Promise<void>}
  */
-function executeDockerCommand(service, type, callback) {
-  const serviceConf = servicesConfig[service];
-  if (!serviceConf || !serviceConf[type]) {
-    return callback(new Error('Servicio no soportado o comando no definido'));
+async function stopContainer(service) {
+  const config = servicesConfig[service];
+  if (!config) {
+    throw new Error('Servicio no soportado');
   }
-  
-  exec(serviceConf[type], (error, stdout, stderr) => {
-    if (error) {
-      return callback(new Error(`Error al ejecutar comando (${type}): ${stderr}`));
-    }
-    callback(null, stdout.trim());
-  });
+  const container = docker.getContainer(config.containerName);
+  try {
+    // Intentar detener el contenedor; si ya está detenido, se ignora el error.
+    await container.stop();
+  } catch (error) {
+    // Ignorar error si el contenedor ya está parado.
+  }
+  await container.remove();
+}
+
+/**
+ * Obtiene la configuración de puertos mapeados del contenedor Docker para el servicio.
+ * @param {string} service - Nombre del servicio.
+ * @returns {Promise<object>} - Información de puertos.
+ */
+async function getPortMapping(service) {
+  const config = servicesConfig[service];
+  if (!config) {
+    throw new Error('Servicio no soportado');
+  }
+  const container = docker.getContainer(config.containerName);
+  const data = await container.inspect();
+  return data.NetworkSettings.Ports;
 }
 
 // Ruta para levantar el contenedor Docker para el servicio indicado
-router.post('/:service', (req, res) => {
+router.post('/:service', async (req, res) => {
   const service = req.params.service;
-  executeDockerCommand(service, 'run', (error, output) => {
-    if (error) {
-      return res.status(500).json({ error: error.message });
-    }
-    res.status(200).json({ message: `Contenedor de ${service} montado exitosamente`, output });
-  });
+  try {
+    await runContainer(service);
+    res.status(200).json({ message: `Contenedor de ${service} montado exitosamente` });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // Ruta para detener y eliminar el contenedor Docker para el servicio indicado
-router.delete('/:service', (req, res) => {
+router.delete('/:service', async (req, res) => {
   const service = req.params.service;
-  executeDockerCommand(service, 'stop', (error, output) => {
-    if (error) {
-      return res.status(500).json({ error: error.message });
-    }
-    res.status(200).json({ message: `Contenedor de ${service} detenido y eliminado exitosamente`, output });
-  });
+  try {
+    await stopContainer(service);
+    res.status(200).json({ message: `Contenedor de ${service} detenido y eliminado exitosamente` });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // Ruta para obtener el puerto mapeado del contenedor Docker para el servicio indicado
-router.get('/:service/port', (req, res) => {
+router.get('/:service/port', async (req, res) => {
   const service = req.params.service;
-  executeDockerCommand(service, 'port', (error, output) => {
-    if (error) {
-      return res.status(500).json({ error: error.message });
-    }
-    res.status(200).json({ message: `Puerto asignado para ${service}`, port: output });
-  });
+  try {
+    const ports = await getPortMapping(service);
+    res.status(200).json({ message: `Puertos mapeados para ${service}`, ports });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 module.exports = router;
