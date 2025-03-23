@@ -10,6 +10,10 @@ app.use(express.json());
 const terraformRoute = require('./services/terraformService');
 app.use('/terraform', terraformRoute);
 
+// Importar y usar la ruta para Docker
+const dockerRoute = require('./services/dockerService');
+app.use('/docker', dockerRoute);
+
 app.listen(port, () => {
   console.log(`Servidor corriendo en el puerto ${port}`);
 });
