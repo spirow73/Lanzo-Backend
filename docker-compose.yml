@@ -1,0 +1,17 @@
+services:
+  app:
+    build: .
+    container_name: express_app
+    ports:
+      - "4000:4000"
+    volumes:
+      - .:/app
+    depends_on:
+      - terraform
+
+  terraform:
+    image: hashicorp/terraform:light
+    container_name: terraform_runner
+    volumes:
+      - ./terraform/test:/workspace
+    working_dir: /workspace
