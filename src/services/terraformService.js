@@ -4,6 +4,7 @@ const router = express.Router();
 const Docker = require('dockerode');
 const docker = new Docker();
 const path = require('path');
+const fs = require('fs');
 
 /**
  * Ejecuta un comando de Terraform en un contenedor usando dockerode.
@@ -66,8 +67,13 @@ async function runTerraformCommand(servicePath, commandType) {
     follow: false
   });
 
-  // Convertir los logs a cadena
-  const logs = logStream.toString('utf8');
+  // Convertir los logs a cadena leyendo el stream de forma adecuada
+  const logs = await new Promise((resolve, reject) => {
+    let result = '';
+    logStream.on('data', chunk => result += chunk.toString('utf8'));
+    logStream.on('end', () => resolve(result));
+    logStream.on('error', reject);
+  });
 
   // Eliminamos el contenedor (para limpiar recursos)
   await container.remove();
@@ -97,6 +103,12 @@ async function deployTerraform(servicePath) {
 router.post('/deploy/:service', async (req, res) => {
   const service = req.params.service;
   const terraformPath = path.join(process.cwd(), 'terraform', service);
+
+  // Validación de existencia del directorio
+  if (!fs.existsSync(terraformPath)) {
+    return res.status(400).json({ error: 'Ruta de servicio no válida o inexistente' });
+  }
+
   try {
     const outputs = await deployTerraform(terraformPath);
     res.status(200).json({ message: 'Despliegue completado con éxito', outputs });
@@ -112,6 +124,12 @@ router.post('/deploy/:service', async (req, res) => {
 router.post('/destroy/:service', async (req, res) => {
   const service = req.params.service;
   const terraformPath = path.join(process.cwd(), 'terraform', service);
+
+  // Validación de existencia del directorio
+  if (!fs.existsSync(terraformPath)) {
+    return res.status(400).json({ error: 'Ruta de servicio no válida o inexistente' });
+  }
+
   try {
     const destroyOutput = await runTerraformCommand(terraformPath, 'destroy');
     res.status(200).json({ message: 'Recursos destruidos con éxito', output: destroyOutput });
